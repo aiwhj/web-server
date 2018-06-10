@@ -5,25 +5,35 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #define BUF_SIZE 1024
+#define EXT "php"
+#define WWWROOT "./wwwroot"
+#define INDEX "/index.html"
 
 #include "server.h"
+#include "sds.h"
 
 typedef struct 
 {
-    char Method[BUF_SIZE];
-    char Url[BUF_SIZE];
-    char Version[BUF_SIZE];
+    sds_hdr *method;
+    sds_hdr *url;
+    sds_hdr *version;
 } t_httpUrl;
 
 typedef struct
 {
-    char *key;
-    int key_len;
-    char *value;
-    int value_len;
+    sds_hdr *key;
+    sds_hdr *value;
 } t_httpParams;
+
+typedef struct
+{
+    int len;
+    t_httpParams *httpParams;
+} t_httpParams_p;
 
 unsigned sockBufferSize(int serv_sock)
 {
@@ -32,59 +42,215 @@ unsigned sockBufferSize(int serv_sock)
     getsockopt(serv_sock, SOL_SOCKET, SO_SNDBUF, (char *)&optVal, (socklen_t*)&optLen);
     return optVal;
 }
-
-void process()
+void header(int clnt_sock, int httpCode, char *type)
 {
-
+    char *ContentType = '\0';
+    char buf[1024];
+    if (strcmp(type, "json"))
+    {
+        ContentType = "Content-type: text/html\r\n";
+    }
+    else if (strcmp(type, "html"))
+    {
+        ContentType = "Content-type: application/json\r\n";
+    }
+    switch (httpCode)
+    {
+        case 200:
+            sprintf(buf, "HTTP/1.0 200 OK\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            send(clnt_sock, ContentType, strlen(ContentType), 0);
+            sprintf(buf, "\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            break;
+        case 500:
+            sprintf(buf, "HTTP/1.0 500 Internal Server Error\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            send(clnt_sock, ContentType, strlen(ContentType), 0);
+            sprintf(buf, "\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            sprintf(buf, "500 Internal Server Error\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            break;
+        case 404:
+            sprintf(buf, "HTTP/1.0 404 NOT FOUND\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            send(clnt_sock, ContentType, strlen(ContentType), 0);
+            sprintf(buf, "\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            sprintf(buf, "404 Not Found\r\n");
+            send(clnt_sock, buf, strlen(buf), 0);
+            break;
+        default:
+            break;
+    }
 }
-int parseRequest(char *request, t_httpUrl **httpUrl, t_httpParams *(*httpParams)[BUF_SIZE])
+int fcgiProcess(int clnt_sock, t_httpParams_p *httpParams_p, char *file, char *ext, char *query, char **response)
 {
-    t_httpUrl httpUrl_tmp;
+    printf("fcgiProcess\n");
+    return 200;
+}
+int fileProcess(int clnt_sock, t_httpParams_p *httpParams_p, char *file, char *ext, char *query, char **response)
+{
+    printf("fileProcess\n");
+    struct stat s_buf;
+    if (file[strlen(file)] == '/')
+    {
+        file[strlen(file)] == '\0';
+    }
+
+    int strLen = strlen(file) + strlen(WWWROOT);
+
+    char *path = malloc(strLen + strlen(INDEX) + 1);
+
+    memcpy(path, WWWROOT, strlen(WWWROOT));
+
+    strcat(path, file);
+
+    stat(path, &s_buf);
+
+    if (S_ISDIR(s_buf.st_mode))
+    {
+        printf("路径是文件夹\n");
+        strLen += strlen(INDEX);
+    }
+    strcat(path, INDEX);
+    path[strLen]='\0';
+    printf("path: %s\n", path);
+    char ch;
+    FILE *fp;
+    int i;
+    char buf[1024];
+    if ((fp = fopen(path, "r")) == NULL)
+    {
+        header(clnt_sock, 404, "html");
+        return 404;
+    }
+    header(clnt_sock, 200, "html");
+    fgets(buf, sizeof(buf), fp);
+    send(clnt_sock, buf, strlen(buf), 0);
+    while (!feof(fp))
+    {
+        send(clnt_sock, buf, strlen(buf), 0);
+        fgets(buf, sizeof(buf), fp);
+    }
+    fclose(fp);
+    return 200;
+}
+
+int parseRequest(char *request, t_httpUrl **httpUrl, t_httpParams **httpParams)
+{
+    t_httpUrl *httpUrl_tmp;
+    t_httpParams *httpParams_tmp;
     printf("parseRequest start\n");
     char *delim = "\n";
     char *p;
-    char key[BUF_SIZE];
-    char value[BUF_SIZE];
+    char buf1[BUF_SIZE];
+    char buf2[BUF_SIZE];
+    char buf3[BUF_SIZE];
     p = strtok(request, delim);
     printf("第一行：%s\n", p);
-    sscanf(p, "%s %s %s", httpUrl_tmp.Method, httpUrl_tmp.Url, httpUrl_tmp.Version);
-    printf("解析过的： %s %s %s\n", httpUrl_tmp.Method, httpUrl_tmp.Url, httpUrl_tmp.Version);
-    *httpUrl = &httpUrl_tmp;
+    sscanf(p, "%s %s %s", buf1, buf2, buf3);
+    httpUrl_tmp = (t_httpUrl *)malloc(sizeof(t_httpUrl));
+    httpUrl_tmp->method = sdsinit(buf1);
+    httpUrl_tmp->url = sdsinit(buf2);
+    httpUrl_tmp->version = sdsinit(buf3);
+    printf("解析过的： %s %s %s\n", httpUrl_tmp->method->str, httpUrl_tmp->url->str, httpUrl_tmp->version->str);
+    *httpUrl = httpUrl_tmp;
+    int initLen = 10;
+    httpParams_tmp = (t_httpParams *)malloc(sizeof(t_httpParams) * initLen);
     int i = 0;
     while ((p = strtok(NULL, delim)))
     {
-        printf("我是一行%s\n", p);
-        sscanf(p, "%s %s", key, value);
-        key[strlen(key)-1] = '\0';
-        printf("我是解析过的一行 key: %s  value: %s\n strlen: %d\n", key, value, (int)strlen(value));
-        char * whj = (char *)malloc(strlen(key) + 1);
-        printf("开始赋值。。22\n");
-        (*httpParams)[i]->key = (char *)malloc(strlen(key) + 1);
-        (*httpParams)[i]->value = (char *)malloc(strlen(value) + 1);
-        printf("开始赋值。。\n");
-        memcpy((*(*httpParams)[i]).key, key, strlen(key));
-        memcpy((*(*httpParams)[i]).value, value, strlen(value));
-        i++;
+        if(i >= initLen)
+        {
+            initLen *= 2;
+            httpParams_tmp = realloc(httpParams_tmp, sizeof(t_httpParams) * initLen);
+        }
+        printf("我是一行%s %d\n", p, (int)strlen(p));
+        if(strlen(p) > 1)
+        {
+            sscanf(p, "%s %s", buf1, buf2);
+            buf1[strlen(buf1) - 1] = '\0';
+            httpParams_tmp[i].key = sdsinit(buf1);
+            httpParams_tmp[i].value = sdsinit(buf2);
+            printf("我是解析过的一行 key: %s  value: %s\n", httpParams_tmp[i].key->str, httpParams_tmp[i].value->str);
+            i++;
+        }
     }
+    httpParams_tmp = realloc(httpParams_tmp, sizeof(t_httpParams) * i);
+    *httpParams = httpParams_tmp;
     printf("\n");
     printf("parseRequest end\n");
     return i;
 }
 
-char *run(char *request)
+char *run(int clnt_sock, char *request)
 {
     char *response = "result";
     t_httpUrl *httpUrl;
-    t_httpParams *httpParams[BUF_SIZE];
-    int params = parseRequest(request, &httpUrl, &httpParams);
-
-    for (int i = params; i >= 0; i--)
+    t_httpParams_p httpParams_p;
+    httpParams_p.len = parseRequest(request, &httpUrl, &(httpParams_p.httpParams));
+    printf("解析过的： %s %s %s\n", httpUrl->method->str, httpUrl->url->str, httpUrl->version->str);
+    for (int i = httpParams_p.len - 1; i >= 0; i--)
     {
-        printf("run 里面的解析过的： %s %s\n", httpParams[i]->key, httpParams[i]->value);
+        printf("run 里面的解析过的： %s %s\n", httpParams_p.httpParams[i].key->str, httpParams_p.httpParams[i].value->str);
     }
+    char *url = malloc(httpUrl->url->len + 1);
+    memcpy(url, httpUrl->url->str, httpUrl->url->len);
+    url[httpUrl->url->len] = '\0';
+    char *file = '\0';
+    char *ext = '\0';
+    char *query = '\0';
+    file = url;
+    while (*url != '\0')
+    {
+        printf("当前字符： %c\n", *url);
+        if (*url == '.')
+        {
+            printf("ext\n");
+            ext = ++url;
+        }
+        else if (*url == '?')
+        {
+            printf("query\n");
+            *url = '\0';
+            query = ++url;
+            break;
+        }
+        else
+        {
+            url++;
+        }
+    }
+    printf("url: %s file: %s ext: %s query: %s\n", url, file, ext, query);
+    if (strcmp(file, "/") == 0)
+    {
+        printf("设置默认\n");
+        file = "index.html";
+        ext = "html";
+    }
+    if (!query)
+    {
+        printf("query 是空的\n");
+    }
+    else
+    {
+        printf("query 不是空的\n");
+    }
+    
+    printf("url: %s file: %s ext: %s query: %s\n", url, file, ext, query);
     printf("你好呀\n");
-    printf("解析过的： %s %s %s\n", httpUrl->Method, httpUrl->Url, httpUrl->Version);
-    process();
+    int httpCode = 200;
+    if (!ext || strcmp(ext, EXT) != 0)
+    {
+        httpCode = fileProcess(clnt_sock, &httpParams_p, file, ext, query, &response);
+    }
+    else
+    {
+        httpCode = fcgiProcess(clnt_sock, &httpParams_p, file, ext, query, &response);
+    }
+    printf("httpCode: %d\n", httpCode);
     return response;
 }
 
@@ -101,7 +267,7 @@ int sockInit()
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));         //每个字节都用0填充
     serv_addr.sin_family = AF_INET;                   //使用IPv4地址
-    serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); //具体的IP地址
+    serv_addr.sin_addr.s_addr = inet_addr("192.168.33.10"); //具体的IP地址
     serv_addr.sin_port = htons(1234);                 //端口
     bind(serv_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
     //进入监听状态，等待用户发起请求
@@ -170,14 +336,14 @@ int main(){
         printf("clnt_sock %d\n", clnt_sock);
         printf("-------request------\n %s\n-------request------\n", request);
         printf("结束acceptData啦\n");
-        char *response = run(request);
+        char *response = run(clnt_sock, request);
         // 1) 首先会检查缓冲区，如果缓冲区中有数据，那么就读取，否则函数会被阻塞，直到网络上有数据到来。
 
         // 2) 如果要读取的数据长度小于缓冲区中的数据长度，那么就不能一次性将缓冲区中的所有数据读出，剩余数据将不断积压，直到有 read()/recv() 函数再次读取。
 
         // 3) 直到读取到数据后 read()/recv() 函数才会返回，否则就一直被阻塞。
         printf("write start\n");
-        write(clnt_sock, response, strlen(response));
+        // write(clnt_sock, response, strlen(response));
         printf("write end\n");
         // 2) 如果TCP协议正在向网络发送数据，那么输出缓冲区会被锁定，不允许写入，write()/send() 也会被阻塞，直到数据发送完毕缓冲区解锁，write()/send() 才会被唤醒。
 
